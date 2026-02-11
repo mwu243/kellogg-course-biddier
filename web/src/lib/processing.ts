@@ -86,6 +86,17 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
         });
     });
 
+    // Filter out Winter 2026 from groups (Target Term)
+    // This prevents "0" prices from the current/future schedule from skewing stats
+    groups.forEach((bids, key) => {
+        const filtered = bids.filter(b => b.term !== "Winter 2026");
+        if (filtered.length > 0) {
+            groups.set(key, filtered);
+        } else {
+            groups.delete(key);
+        }
+    });
+
     // 3. Aggregate Stats with Enhanced Forecasting
     groups.forEach((bids, key) => {
         const { courseId, courseName, professor } = bids[0]; // Take metadata from first entry
