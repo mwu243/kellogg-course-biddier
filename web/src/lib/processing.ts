@@ -191,8 +191,8 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
 
         // Determine if good value: high rating + relatively low price
         const isGoodValue = (review?.overallRating || 0) >= 5.0 &&
-                          enhancedForecasts.forecastR1 > 0 &&
-                          enhancedForecasts.forecastR1 < 500;
+            enhancedForecasts.forecastR1 > 0 &&
+            enhancedForecasts.forecastR1 < 500;
 
         coursesMap.set(key, {
             courseId,
@@ -218,6 +218,8 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
             forecastedBidR3: enhancedForecasts.forecastR3,
             forecastedBidR4: enhancedForecasts.forecastR4,
             forecastMetadata,
+            probabilityDataR1: enhancedForecasts.probabilityDataR1,
+            probabilityDataR2: enhancedForecasts.probabilityDataR2,
             isGoodValue,
             history,
         });

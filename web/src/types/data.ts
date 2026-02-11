@@ -107,4 +107,8 @@ export interface CourseStats {
         bidsPlaced?: number;
         spotsAvailable?: number;
     }[];
+
+    // Probability Data (per phase)
+    probabilityDataR1?: Array<{ bid: number; probability: number }>;
+    probabilityDataR2?: Array<{ bid: number; probability: number }>;
 }

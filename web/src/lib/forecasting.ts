@@ -69,6 +69,9 @@ export interface ForecastResult {
 
     // Explanation
     factors: ForecastFactor[];
+
+    // Probability Distribution for plotting
+    probabilityData?: Array<{ bid: number; probability: number }>;
 }
 
 export interface ForecastFactor {
@@ -613,6 +616,7 @@ function forecastPhase(
         volatility,
         demandPressure,
         factors,
+        probabilityData: calculateProbabilityDistribution(prices, expectedPrice, expectedPrice * volatility),
     };
 }
 
@@ -708,9 +712,11 @@ function estimateFromOtherPhases(
         },
     ];
 
+    const expectedPrice = Math.round(baseForecast.expectedPrice * multiplier);
+
     return {
         phase: targetPhase,
-        expectedPrice: Math.round(baseForecast.expectedPrice * multiplier),
+        expectedPrice,
         safeBid: Math.round(baseForecast.safeBid * multiplier),
         aggressiveBid: Math.round(baseForecast.aggressiveBid * multiplier),
         minimumBid: Math.round(baseForecast.minimumBid * multiplier),
@@ -721,6 +727,7 @@ function estimateFromOtherPhases(
         volatility: baseForecast.volatility,
         demandPressure: baseForecast.demandPressure,
         factors,
+        probabilityData: calculateProbabilityDistribution([], expectedPrice, expectedPrice * baseForecast.volatility),
     };
 }
 
@@ -1028,6 +1035,8 @@ export function calculateEnhancedForecasts(
     trend: "rising" | "stable" | "falling" | "unknown";
     demandLevel: "very_high" | "high" | "moderate" | "low";
     strategyNotes: string[];
+    probabilityDataR1?: Array<{ bid: number; probability: number }>;
+    probabilityDataR2?: Array<{ bid: number; probability: number }>;
 } {
     // Convert bids to our format
     const historicalBids: HistoricalBid[] = bids.map(b => ({
@@ -1069,6 +1078,8 @@ export function calculateEnhancedForecasts(
         trend: forecast.forecasts.phase1.trend,
         demandLevel,
         strategyNotes: forecast.strategyNotes,
+        probabilityDataR1: forecast.forecasts.phase1.probabilityData,
+        probabilityDataR2: forecast.forecasts.phase2.probabilityData,
     };
 }
 
@@ -1082,4 +1093,77 @@ function normalizePhase(phase: Phase): PhaseType {
     if (p === "3" || p.includes("phase 3")) return "3";
     if (p === "4" || p.includes("pwyb") || p.includes("pay") || p.includes("add/drop")) return "4";
     return "1"; // Default
+}
+
+/**
+ * Calculate probability distribution for plotting (Log-Normal approximation)
+ */
+function calculateProbabilityDistribution(
+    prices: number[],
+    meanPrice: number,
+    stdDev: number
+): Array<{ bid: number; probability: number }> {
+    // If mean is 0, return empty
+    if (meanPrice <= 0) return [];
+
+    // If stdDev is 0 (or very small), return step function
+    if (stdDev < 1) {
+        return [
+            { bid: Math.max(0, meanPrice - 10), probability: 0 },
+            { bid: meanPrice, probability: 50 },
+            { bid: meanPrice + 10, probability: 100 }
+        ];
+    }
+
+    // Use Log-Normal distribution because prices > 0 and usually right-skewed
+    // If mean/stdev are from normal space, we need to convert to log-space params
+    // sigma_log^2 = ln(1 + var/mean^2)
+    // mu_log = ln(mean) - 0.5 * sigma_log^2
+
+    const variance = stdDev * stdDev;
+    const sigma_log_sq = Math.log(1 + variance / (meanPrice * meanPrice));
+    const sigma_log = Math.sqrt(sigma_log_sq);
+    const mu_log = Math.log(meanPrice) - 0.5 * sigma_log_sq;
+
+    const points: Array<{ bid: number; probability: number }> = [];
+    const minBid = Math.max(0, meanPrice - 2.5 * stdDev);
+    const maxBid = meanPrice + 3 * stdDev;
+    // Ensure we have a reasonable range
+    const startRange = Math.max(0, Math.floor(minBid / 10) * 10);
+    const endRange = Math.ceil(maxBid / 10) * 10;
+    const step = Math.max(1, (endRange - startRange) / 50);
+
+    for (let bid = startRange; bid <= endRange; bid += step) {
+        if (bid <= 0) continue;
+
+        // Log-Normal CDF: 0.5 + 0.5 * erf((ln(x) - mu) / (sigma * sqrt(2)))
+        const z = (Math.log(bid) - mu_log) / (sigma_log * Math.sqrt(2));
+        const prob = 0.5 * (1 + erf(z));
+
+        points.push({
+            bid: Math.round(bid),
+            probability: Math.round(prob * 100),
+        });
+    }
+
+    return points;
+}
+
+/**
+ * Error function approximation (Abramowitz and Stegun)
+ */
+function erf(x: number): number {
+    const sign = x >= 0 ? 1 : -1;
+    x = Math.abs(x);
+    const a1 = 0.254829592;
+    const a2 = -0.284496736;
+    const a3 = 1.421413741;
+    const a4 = -1.453152027;
+    const a5 = 1.061405429;
+    const p = 0.3275911;
+
+    const t = 1.0 / (1.0 + p * x);
+    const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+
+    return sign * y;
 }

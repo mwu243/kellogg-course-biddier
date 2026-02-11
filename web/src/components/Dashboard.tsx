@@ -5,6 +5,7 @@ import { CourseStats, Phase } from "@/types/data";
 import { Search, Filter, X, Star, Clock, MapPin, TrendingUp, BookOpen, Users, DollarSign, Calendar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PriceChart } from "./PriceChart";
+import { BidProbabilityChart } from "./BidProbabilityChart";
 
 interface DashboardProps {
     data: CourseStats[];
@@ -362,6 +363,28 @@ export function Dashboard({ data }: DashboardProps) {
                                         </h4>
                                         <div className="bg-neutral-50 rounded-xl p-4">
                                             <PriceChart data={selectedCourse.history} />
+                                        </div>
+                                    </div>
+
+                                    {/* Win Probability Chart */}
+                                    <div className="px-6 pb-6 border-t border-neutral-100 pt-6">
+                                        <h4 className="text-sm font-semibold text-neutral-700 mb-4 flex items-center gap-2">
+                                            <TrendingUp className="w-4 h-4 text-emerald-600" />
+                                            Win Probability (Phase {selectedPhase === "4" ? "PWYB" : selectedPhase})
+                                        </h4>
+                                        <div className="bg-neutral-50 rounded-xl p-4">
+                                            <BidProbabilityChart
+                                                data={selectedPhase === "1" ? selectedCourse.probabilityDataR1 ?? [] : selectedPhase === "2" ? selectedCourse.probabilityDataR2 ?? [] : []}
+                                                safeBid={(() => {
+                                                    const forecasts: Record<string, number | undefined> = {
+                                                        "1": selectedCourse.forecastedBidR1,
+                                                        "2": selectedCourse.forecastedBidR2,
+                                                        "3": selectedCourse.forecastedBidR3,
+                                                        "4": selectedCourse.forecastedBidR4,
+                                                    };
+                                                    return forecasts[selectedPhase] ?? 0;
+                                                })()}
+                                            />
                                         </div>
                                     </div>
 
