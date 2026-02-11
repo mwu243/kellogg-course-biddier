@@ -99,6 +99,9 @@ const CONFIG = {
     // Value of 0.3 means data from 1 year ago has weight e^(-0.3) ~ 0.74
     TIME_DECAY_FACTOR: 0.3,
 
+    // Inflation rate per year (points tend to devalue or budgets increase)
+    INFLATION_RATE: 0.03,
+
     // Minimum data points for each confidence level
     MIN_DATA_HIGH_CONFIDENCE: 6,
     MIN_DATA_MEDIUM_CONFIDENCE: 3,
@@ -495,7 +498,12 @@ function forecastPhase(
         const termNum = parseTermToNumber(bid.term);
         const weight = calculateTimeWeight(termNum, currentTerm);
 
-        prices.push(bid.clearingPrice);
+        // Adjust for inflation: P_current = P_hist * (1 + rate)^years
+        const yearsDiff = (currentTerm - termNum) / 4;
+        const inflationFactor = Math.pow(1 + CONFIG.INFLATION_RATE, Math.max(0, yearsDiff));
+        const adjustedPrice = bid.clearingPrice * inflationFactor;
+
+        prices.push(adjustedPrice);
         terms.push(termNum);
         weights.push(weight);
 
@@ -582,7 +590,7 @@ function forecastPhase(
 
     // Combine all adjustments
     const totalMultiplier = trendMultiplier * ratingMultiplier * demandMultiplier *
-                           timeAdjustment * campusAdjustment;
+        timeAdjustment * campusAdjustment;
 
     const expectedPrice = Math.round(basePrice * totalMultiplier);
 
@@ -649,7 +657,7 @@ function estimateFromOtherPhases(
 
     // Get base forecast
     const baseForecast = forecastPhase(basePhase as PhaseType, baseBids, allBids,
-                                       professorData, meetingTime, campus);
+        professorData, meetingTime, campus);
 
     // Apply phase relationship multiplier
     let multiplier = 1.0;
@@ -851,22 +859,22 @@ function generateOverallRecommendation(
     // For high-demand courses, recommend Phase 1
     if (p1.demandPressure > 0.7) {
         return `High demand course. Recommend Phase 1 with safe bid of ${p1.safeBid} points. ` +
-               `Later phases are risky due to seat scarcity.`;
+            `Later phases are risky due to seat scarcity.`;
     }
 
     // For typical courses, suggest the value option
     if (cheapest.phase === "PWYB" && p4.confidence !== "low") {
         return `Value opportunity in PWYB at ~${p4.expectedPrice} points, but availability uncertain. ` +
-               `Safe option: Phase 1 at ${p1.safeBid} points.`;
+            `Safe option: Phase 1 at ${p1.safeBid} points.`;
     }
 
     if (cheapest.phase === "Phase 3" && p3.confidence !== "low") {
         return `Phase 3 offers best value at ~${p3.expectedPrice} points if section flexibility is OK. ` +
-               `For specific section: Phase 1 at ${p1.safeBid} points.`;
+            `For specific section: Phase 1 at ${p1.safeBid} points.`;
     }
 
     return `Recommend Phase 1 with ${p1.safeBid} points for high confidence, ` +
-           `or ${p1.aggressiveBid} points if willing to risk Phase 2.`;
+        `or ${p1.aggressiveBid} points if willing to risk Phase 2.`;
 }
 
 // =============================================================================
