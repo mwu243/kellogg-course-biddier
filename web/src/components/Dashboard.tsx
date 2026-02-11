@@ -101,20 +101,20 @@ export function Dashboard({ data }: DashboardProps) {
                         )}
                     </div>
 
-                    {/* Phase Toggle - Segmented Control */}
+                    {/* Phase Toggle - Segmented Control - All 4 Phases */}
                     <div className="flex items-center bg-neutral-100 p-1 rounded-xl">
-                        {(["1", "2"] as Phase[]).map((phase) => (
+                        {(["1", "2", "3", "4"] as Phase[]).map((phase) => (
                             <button
                                 key={phase}
                                 onClick={() => setSelectedPhase(phase)}
                                 className={cn(
-                                    "px-6 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200",
+                                    "px-4 py-2 rounded-lg text-sm font-semibold transition-all duration-200",
                                     selectedPhase === phase
                                         ? "bg-white text-purple-700 shadow-sm"
                                         : "text-neutral-500 hover:text-neutral-700"
                                 )}
                             >
-                                Phase {phase}
+                                {phase === "4" ? "PWYB" : `P${phase}`}
                             </button>
                         ))}
                     </div>
@@ -238,16 +238,47 @@ export function Dashboard({ data }: DashboardProps) {
                                         <div className="bg-gradient-to-br from-neutral-900 to-neutral-800 rounded-xl p-6 text-white">
                                             <div className="flex items-center gap-2 mb-2">
                                                 <TrendingUp className="w-5 h-5 text-purple-400" />
-                                                <span className="text-neutral-400 text-sm font-medium">Recommended Bid (Phase {selectedPhase})</span>
+                                                <span className="text-neutral-400 text-sm font-medium">
+                                                    Recommended Bid ({selectedPhase === "4" ? "PWYB" : `Phase ${selectedPhase}`})
+                                                </span>
                                             </div>
                                             <div className="text-5xl font-bold mb-3 tracking-tight">
-                                                {selectedPhase === "1" ? selectedCourse.forecastedBidR1 ?? "N/A" : selectedCourse.forecastedBidR2 ?? "N/A"}
+                                                {(() => {
+                                                    const forecasts: Record<string, number | undefined> = {
+                                                        "1": selectedCourse.forecastedBidR1,
+                                                        "2": selectedCourse.forecastedBidR2,
+                                                        "3": selectedCourse.forecastedBidR3,
+                                                        "4": selectedCourse.forecastedBidR4,
+                                                    };
+                                                    return forecasts[selectedPhase] ?? "N/A";
+                                                })()}
                                                 <span className="text-2xl font-normal text-neutral-400 ml-2">pts</span>
                                             </div>
-                                            <div className="flex gap-2">
+                                            <div className="flex flex-wrap gap-2">
                                                 <span className="px-3 py-1 bg-purple-500/20 text-purple-300 text-xs font-semibold rounded-full">
                                                     Safe Bid
                                                 </span>
+                                                {selectedCourse.forecastMetadata?.confidence && (
+                                                    <span className={cn(
+                                                        "px-3 py-1 text-xs font-semibold rounded-full",
+                                                        selectedCourse.forecastMetadata.confidence === "high" && "bg-emerald-500/20 text-emerald-300",
+                                                        selectedCourse.forecastMetadata.confidence === "medium" && "bg-amber-500/20 text-amber-300",
+                                                        selectedCourse.forecastMetadata.confidence === "low" && "bg-orange-500/20 text-orange-300",
+                                                        selectedCourse.forecastMetadata.confidence === "insufficient" && "bg-red-500/20 text-red-300"
+                                                    )}>
+                                                        {selectedCourse.forecastMetadata.confidence} confidence
+                                                    </span>
+                                                )}
+                                                {selectedCourse.forecastMetadata?.trend && selectedCourse.forecastMetadata.trend !== "unknown" && (
+                                                    <span className={cn(
+                                                        "px-3 py-1 text-xs font-semibold rounded-full",
+                                                        selectedCourse.forecastMetadata.trend === "rising" && "bg-rose-500/20 text-rose-300",
+                                                        selectedCourse.forecastMetadata.trend === "falling" && "bg-emerald-500/20 text-emerald-300",
+                                                        selectedCourse.forecastMetadata.trend === "stable" && "bg-blue-500/20 text-blue-300"
+                                                    )}>
+                                                        {selectedCourse.forecastMetadata.trend} trend
+                                                    </span>
+                                                )}
                                                 {selectedCourse.isGoodValue && (
                                                     <span className="px-3 py-1 bg-emerald-500/20 text-emerald-300 text-xs font-semibold rounded-full">
                                                         Great Value
@@ -255,19 +286,42 @@ export function Dashboard({ data }: DashboardProps) {
                                                 )}
                                             </div>
                                         </div>
+
+                                        {/* Strategy Notes */}
+                                        {selectedCourse.forecastMetadata?.strategyNotes && selectedCourse.forecastMetadata.strategyNotes.length > 0 && (
+                                            <div className="mt-4 space-y-2">
+                                                <h4 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Strategy Notes</h4>
+                                                {selectedCourse.forecastMetadata.strategyNotes.map((note, i) => (
+                                                    <div key={i} className="text-sm text-neutral-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                                                        {note}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
 
-                                    {/* Stats Grid */}
+                                    {/* Stats Grid - All 4 Phases */}
                                     <div className="px-6 pb-6">
+                                        <h4 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Historical Medians</h4>
+                                        <div className="grid grid-cols-4 gap-2 mb-4">
+                                            <div className="bg-purple-50 rounded-lg p-3 text-center">
+                                                <p className="text-xs text-purple-600 font-medium mb-1">P1</p>
+                                                <p className="text-lg font-bold text-purple-900">{Math.round(selectedCourse.medianClearingPriceR1) || "-"}</p>
+                                            </div>
+                                            <div className="bg-emerald-50 rounded-lg p-3 text-center">
+                                                <p className="text-xs text-emerald-600 font-medium mb-1">P2</p>
+                                                <p className="text-lg font-bold text-emerald-900">{Math.round(selectedCourse.medianClearingPriceR2) || "-"}</p>
+                                            </div>
+                                            <div className="bg-amber-50 rounded-lg p-3 text-center">
+                                                <p className="text-xs text-amber-600 font-medium mb-1">P3</p>
+                                                <p className="text-lg font-bold text-amber-900">{Math.round(selectedCourse.medianClearingPriceR3 ?? 0) || "-"}</p>
+                                            </div>
+                                            <div className="bg-rose-50 rounded-lg p-3 text-center">
+                                                <p className="text-xs text-rose-600 font-medium mb-1">PWYB</p>
+                                                <p className="text-lg font-bold text-rose-900">{Math.round(selectedCourse.medianClearingPriceR4 ?? 0) || "-"}</p>
+                                            </div>
+                                        </div>
                                         <div className="grid grid-cols-2 gap-3">
-                                            <div className="bg-neutral-50 rounded-xl p-4">
-                                                <p className="text-xs text-neutral-500 uppercase tracking-wide mb-1">Median R1</p>
-                                                <p className="text-2xl font-bold text-neutral-900">{Math.round(selectedCourse.medianClearingPriceR1)}</p>
-                                            </div>
-                                            <div className="bg-neutral-50 rounded-xl p-4">
-                                                <p className="text-xs text-neutral-500 uppercase tracking-wide mb-1">Median R2</p>
-                                                <p className="text-2xl font-bold text-neutral-900">{Math.round(selectedCourse.medianClearingPriceR2)}</p>
-                                            </div>
                                             <div className="bg-neutral-50 rounded-xl p-4">
                                                 <p className="text-xs text-neutral-500 uppercase tracking-wide mb-1">Prof Rating</p>
                                                 <div className="flex items-center gap-1">
@@ -281,6 +335,22 @@ export function Dashboard({ data }: DashboardProps) {
                                                 <p className="text-xs text-neutral-500 uppercase tracking-wide mb-1">Terms Offered</p>
                                                 <p className="text-2xl font-bold text-neutral-900">{selectedCourse.terms?.length ?? 0}</p>
                                             </div>
+                                            {selectedCourse.forecastMetadata?.demandLevel && (
+                                                <div className="bg-neutral-50 rounded-xl p-4 col-span-2">
+                                                    <p className="text-xs text-neutral-500 uppercase tracking-wide mb-1">Demand Level</p>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={cn(
+                                                            "text-lg font-bold capitalize",
+                                                            selectedCourse.forecastMetadata.demandLevel === "very_high" && "text-rose-600",
+                                                            selectedCourse.forecastMetadata.demandLevel === "high" && "text-orange-600",
+                                                            selectedCourse.forecastMetadata.demandLevel === "moderate" && "text-amber-600",
+                                                            selectedCourse.forecastMetadata.demandLevel === "low" && "text-emerald-600"
+                                                        )}>
+                                                            {selectedCourse.forecastMetadata.demandLevel.replace("_", " ")}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 

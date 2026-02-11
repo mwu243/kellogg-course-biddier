@@ -1,5 +1,5 @@
 export type Term = string; // e.g., "Fall 2024"
-export type Phase = "1" | "2" | "Add/Drop" | "Year-Long" | "Unknown";
+export type Phase = "1" | "2" | "3" | "4" | "Add/Drop" | "Year-Long" | "Unknown";
 
 // Time slot for conflict detection
 export interface TimeSlot {
@@ -26,6 +26,8 @@ export interface AvailableCourse {
     historicalStats?: CourseStats;
     estimatedBidR1?: number;
     estimatedBidR2?: number;
+    estimatedBidR3?: number;
+    estimatedBidR4?: number;
 }
 
 export interface BidHistory {
@@ -36,7 +38,7 @@ export interface BidHistory {
     phase: Phase;
     clearingPrice: number;
     spotsAvailable: number;
-    bidsPlaced: number; // Optional, often not in public data
+    bidsPlaced: number; // Number of bids placed (for demand calculation)
     meetingPattern?: string; // e.g., "Tue 8:30AM - 11:30AM"
     campus?: string; // e.g., "Evanston", "Chicago"
 }
@@ -46,6 +48,16 @@ export interface ProfessorReview {
     overallRating: number; // 1-6 scale
     difficulty?: number;
     wouldTakeAgainPct?: number;
+}
+
+// Enhanced forecast metadata
+export interface ForecastMetadata {
+    confidence: "high" | "medium" | "low" | "insufficient";
+    trend: "rising" | "stable" | "falling" | "unknown";
+    trendStrength: number; // 0-1
+    demandLevel: "very_high" | "high" | "moderate" | "low";
+    volatility: number; // coefficient of variation
+    strategyNotes: string[];
 }
 
 export interface CourseStats {
@@ -58,21 +70,41 @@ export interface CourseStats {
     campus?: string; // e.g., "Evanston", "Chicago"
     terms: string[]; // List of terms this course was offered
 
-    // Aggregated Stats
+    // Aggregated Stats - All 4 Phases
     avgClearingPriceR1: number;
     avgClearingPriceR2: number;
+    avgClearingPriceR3?: number;
+    avgClearingPriceR4?: number;
     medianClearingPriceR1: number;
     medianClearingPriceR2: number;
+    medianClearingPriceR3?: number;
+    medianClearingPriceR4?: number;
 
     // Review Data (Linked)
     professorRating?: number;
     professorReview?: ProfessorReview;
 
-    // Forecasts
+    // Forecasts - All 4 Phases with safe bids
     forecastedBidR1?: number;
     forecastedBidR2?: number;
+    forecastedBidR3?: number;
+    forecastedBidR4?: number;
+
+    // Enhanced forecast data
+    forecastMetadata?: ForecastMetadata;
+
+    // Value assessment
     isGoodValue?: boolean; // High rating, low price
 
-    // Time Series for Charts
-    history: { term: string; priceR1: number; priceR2: number; meetingPattern?: string }[];
+    // Time Series for Charts - All 4 Phases
+    history: {
+        term: string;
+        priceR1: number;
+        priceR2: number;
+        priceR3?: number;
+        priceR4?: number;
+        meetingPattern?: string;
+        bidsPlaced?: number;
+        spotsAvailable?: number;
+    }[];
 }

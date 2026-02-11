@@ -1,4 +1,5 @@
-import { AvailableCourse, BidHistory, CourseStats, Phase, ProfessorReview, TimeSlot } from "@/types/data";
+import { AvailableCourse, BidHistory, CourseStats, Phase, ProfessorReview, TimeSlot, ForecastMetadata } from "@/types/data";
+import { calculateEnhancedForecasts } from "./forecasting";
 
 // Helper to normalize strings for comparison
 const normalize = (str: string) => str.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
@@ -31,18 +32,20 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
         const price = parseInt(row["Closing Cost"] || row["Clearing Price"] || row["Price"] || row["price"] || "0");
         const rawPhase = (row["Phase"] || row["Round"] || row["phase"] || "Unknown").toString();
 
-        // Extract phase number from strings like "Fall 2023 Bid Phase 1" or "Fall 2023 Pay What You Bid"
+        // Enhanced phase extraction - supports all 4 phases
         let phase: Phase = "Unknown";
-        if (rawPhase.includes("Phase 1") || rawPhase.includes("Round 1")) {
+        if (rawPhase.includes("Phase 1") || rawPhase.includes("Round 1") || rawPhase === "1") {
             phase = "1";
-        } else if (rawPhase.includes("Phase 2") || rawPhase.includes("Round 2")) {
+        } else if (rawPhase.includes("Phase 2") || rawPhase.includes("Round 2") || rawPhase === "2") {
             phase = "2";
-        } else if (rawPhase.includes("Phase 3") || rawPhase.includes("Round 3")) {
-            phase = "1"; // Treat Phase 3 as similar to Phase 1 for stats
-        } else if (rawPhase.includes("Pay What You Bid") || rawPhase.includes("Add/Drop")) {
+        } else if (rawPhase.includes("Phase 3") || rawPhase.includes("Round 3") || rawPhase === "3") {
+            phase = "3";
+        } else if (rawPhase.includes("Phase 4") || rawPhase.includes("Round 4") || rawPhase === "4") {
+            phase = "4";
+        } else if (rawPhase.includes("Pay What You Bid") || rawPhase.includes("PWYB")) {
+            phase = "4"; // PWYB is Phase 4
+        } else if (rawPhase.includes("Add/Drop")) {
             phase = "Add/Drop";
-        } else if (rawPhase === "1" || rawPhase === "2") {
-            phase = rawPhase as Phase;
         }
 
         if (!courseId || !professor) return;
@@ -76,20 +79,22 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
             term: row["Term"] || row["Quarter"] || "Unknown",
             phase,
             clearingPrice: price,
-            spotsAvailable: parseInt(row["Seats Available"] || row["Spots"] || "0"),
-            bidsPlaced: parseInt(row["Number of Bids"] || row["Bids"] || "0"),
+            spotsAvailable: parseInt(row["Seats Available"] || row["Spots"] || row["spots_available"] || "0"),
+            bidsPlaced: parseInt(row["Number of Bids"] || row["Bids"] || row["bids_placed"] || "0"),
             meetingPattern,
             campus: row["Campus"] || "",
         });
     });
 
-    // 3. Aggregate Stats
+    // 3. Aggregate Stats with Enhanced Forecasting
     groups.forEach((bids, key) => {
         const { courseId, courseName, professor } = bids[0]; // Take metadata from first entry
 
-        // Sort by price to calc median
+        // Sort by price to calc median - now for all 4 phases
         const bidsR1 = bids.filter(b => b.phase === "1");
         const bidsR2 = bids.filter(b => b.phase === "2");
+        const bidsR3 = bids.filter(b => b.phase === "3");
+        const bidsR4 = bids.filter(b => b.phase === "4" || b.phase === "Add/Drop");
 
         const calcMedian = (items: BidHistory[]) => {
             if (items.length === 0) return 0;
@@ -103,7 +108,7 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
             return items.reduce((sum, b) => sum + b.clearingPrice, 0) / items.length;
         };
 
-        // Build History Series
+        // Build History Series - now includes all 4 phases
         const terms = Array.from(new Set(bids.map(b => b.term))); // Unique terms
         // Sort terms chronologically
         terms.sort((a, b) => {
@@ -117,11 +122,28 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
         });
 
         const history = terms.map(term => {
-            const turnBids = bids.filter(b => b.term === term);
-            const p1 = turnBids.find(b => b.phase === "1")?.clearingPrice || 0;
-            const p2 = turnBids.find(b => b.phase === "2")?.clearingPrice || 0;
-            const pattern = turnBids[0]?.meetingPattern || "";
-            return { term, priceR1: p1, priceR2: p2, meetingPattern: pattern };
+            const termBids = bids.filter(b => b.term === term);
+            const p1 = termBids.find(b => b.phase === "1")?.clearingPrice || 0;
+            const p2 = termBids.find(b => b.phase === "2")?.clearingPrice || 0;
+            const p3 = termBids.find(b => b.phase === "3")?.clearingPrice || 0;
+            const p4Bid = termBids.find(b => b.phase === "4" || b.phase === "Add/Drop");
+            const p4 = p4Bid?.clearingPrice || 0;
+            const pattern = termBids[0]?.meetingPattern || "";
+
+            // Sum up bids and spots for demand calculation
+            const totalBids = termBids.reduce((sum, b) => sum + (b.bidsPlaced || 0), 0);
+            const totalSpots = termBids.reduce((sum, b) => sum + (b.spotsAvailable || 0), 0);
+
+            return {
+                term,
+                priceR1: p1,
+                priceR2: p2,
+                priceR3: p3,
+                priceR4: p4,
+                meetingPattern: pattern,
+                bidsPlaced: totalBids,
+                spotsAvailable: totalSpots,
+            };
         });
 
         // Get most recent meeting pattern and campus
@@ -141,19 +163,36 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
             }
         }
 
-        // Forecasting Logic
-        const basePriceR1 = calcMedian(bidsR1);
-        const starPower = (review?.overallRating || 0) > 5.5;
+        // =====================================================
+        // ENHANCED FORECASTING - Replace simple median logic
+        // =====================================================
+        const enhancedForecasts = calculateEnhancedForecasts(
+            bids.map(b => ({
+                term: b.term,
+                phase: b.phase,
+                clearingPrice: b.clearingPrice,
+                spotsAvailable: b.spotsAvailable,
+                bidsPlaced: b.bidsPlaced,
+            })),
+            review?.overallRating,
+            meetingPattern,
+            campus
+        );
 
-        // Simple Forecast: Median + 15% if Star Power
-        let forecastR1 = basePriceR1;
-        if (starPower) forecastR1 = Math.ceil(forecastR1 * 1.15);
-        // If no history, maybe fallback? For now 0.
+        // Create forecast metadata
+        const forecastMetadata: ForecastMetadata = {
+            confidence: enhancedForecasts.confidence,
+            trend: enhancedForecasts.trend,
+            trendStrength: 0, // Could be populated from full forecast
+            demandLevel: enhancedForecasts.demandLevel,
+            volatility: 0, // Could be populated from full forecast
+            strategyNotes: enhancedForecasts.strategyNotes,
+        };
 
-        // Forecast R2
-        const basePriceR2 = calcMedian(bidsR2);
-        let forecastR2 = basePriceR2;
-        // R2 is usually cheaper, but if R1 was super high, maybe R2 is also high?
+        // Determine if good value: high rating + relatively low price
+        const isGoodValue = (review?.overallRating || 0) >= 5.0 &&
+                          enhancedForecasts.forecastR1 > 0 &&
+                          enhancedForecasts.forecastR1 < 500;
 
         coursesMap.set(key, {
             courseId,
@@ -162,15 +201,24 @@ export function processData(rawBids: any[], rawReviews: any[]): CourseStats[] {
             meetingPattern,
             campus,
             terms,
+            // Aggregated stats for all 4 phases
             avgClearingPriceR1: calcAvg(bidsR1),
             avgClearingPriceR2: calcAvg(bidsR2),
+            avgClearingPriceR3: calcAvg(bidsR3),
+            avgClearingPriceR4: calcAvg(bidsR4),
             medianClearingPriceR1: calcMedian(bidsR1),
             medianClearingPriceR2: calcMedian(bidsR2),
+            medianClearingPriceR3: calcMedian(bidsR3),
+            medianClearingPriceR4: calcMedian(bidsR4),
             professorReview: review,
             professorRating: review?.overallRating,
-            forecastedBidR1: forecastR1,
-            forecastedBidR2: forecastR2,
-            isGoodValue: (review?.overallRating || 0) > 5.0 && basePriceR1 < 500,
+            // Enhanced forecasts for all 4 phases
+            forecastedBidR1: enhancedForecasts.forecastR1,
+            forecastedBidR2: enhancedForecasts.forecastR2,
+            forecastedBidR3: enhancedForecasts.forecastR3,
+            forecastedBidR4: enhancedForecasts.forecastR4,
+            forecastMetadata,
+            isGoodValue,
             history,
         });
     });
@@ -334,6 +382,8 @@ export function processSchedule(rawSchedule: any[], historicalStats: CourseStats
             historicalStats,
             estimatedBidR1: historicalStats?.forecastedBidR1,
             estimatedBidR2: historicalStats?.forecastedBidR2,
+            estimatedBidR3: historicalStats?.forecastedBidR3,
+            estimatedBidR4: historicalStats?.forecastedBidR4,
         });
     });
 
