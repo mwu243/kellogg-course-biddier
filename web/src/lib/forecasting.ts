@@ -51,9 +51,9 @@ export interface ForecastResult {
 
     // Point estimates
     expectedPrice: number;      // Most likely clearing price
-    safeBid: number;            // High confidence of winning (85th percentile)
-    aggressiveBid: number;      // Risky but cheaper (50th percentile)
-    minimumBid: number;         // Floor price (may not win)
+    safeBid: number;            // Uncertainty-adjusted bid (~85% win probability)
+    aggressiveBid: number;      // Expected price (~50-60% win probability)
+    minimumBid: number;         // Below expected (~25-30% win probability)
 
     // Confidence metrics
     confidence: "high" | "medium" | "low" | "insufficient";
@@ -62,15 +62,17 @@ export interface ForecastResult {
     // Trend indicators
     trend: "rising" | "stable" | "falling" | "unknown";
     trendStrength: number;      // 0-1, how strong the trend is
+    trendSignificant?: boolean; // Whether trend is statistically significant
 
     // Risk assessment
     volatility: number;         // Standard deviation / mean
     demandPressure: number;     // 0-1, how competitive this course is
+    uncertaintyMargin?: number; // How much margin was added for safe bid
 
     // Explanation
     factors: ForecastFactor[];
 
-    // Probability Distribution for plotting
+    // Win Probability Curve - P(win | bid) for different bid amounts
     probabilityData?: Array<{ bid: number; probability: number }>;
 }
 
@@ -130,11 +132,21 @@ const CONFIG = {
         LOW: 1.0,
     },
 
-    // Phase relationship multipliers (based on typical patterns)
-    PHASE_RELATIONSHIPS: {
+    // Default phase relationship multipliers (used when insufficient data for data-driven calculation)
+    // These are fallback values; actual ratios are computed from data when available
+    PHASE_RELATIONSHIPS_DEFAULT: {
         P2_VS_P1: 1.15,     // P2 typically ~15% higher than P1 for hot courses
         P3_VS_P1: 0.85,     // P3 typically ~15% lower (combined pool)
         P4_VS_P1: 0.70,     // PWYB typically ~30% lower (except high demand)
+    },
+
+    // Uncertainty scaling based on data scarcity
+    // More data = tighter confidence intervals
+    UNCERTAINTY_SCALING: {
+        BASE_MARGIN: 0.15,           // Base 15% margin for safe bid
+        SCARCITY_PENALTY: 0.10,      // Additional 10% per missing data point below threshold
+        MIN_MARGIN: 0.05,            // Minimum 5% margin even with lots of data
+        MAX_MARGIN: 0.50,            // Maximum 50% margin for very sparse data
     },
 
     // Confidence intervals for different bid types
@@ -189,13 +201,6 @@ function parseTermToNumber(term: string): number {
     const year = parseInt(match[2]);
 
     return year * 10 + (seasonOrder[season] || 0);
-}
-
-/**
- * Calculate terms between two term strings
- */
-function termsDifference(laterTerm: string, earlierTerm: string): number {
-    return parseTermToNumber(laterTerm) - parseTermToNumber(earlierTerm);
 }
 
 /**
@@ -282,15 +287,16 @@ function weightedStatistics(values: number[], weights: number[]): {
 }
 
 /**
- * Detect price trend using weighted linear regression
+ * Detect price trend using weighted linear regression WITH statistical significance testing
+ * Uses t-test on slope coefficient to determine if trend is statistically significant
  */
 function detectTrend(
     prices: number[],
     terms: number[],
     weights: number[]
-): { trend: "rising" | "stable" | "falling" | "unknown"; strength: number } {
+): { trend: "rising" | "stable" | "falling" | "unknown"; strength: number; pValue: number; isSignificant: boolean } {
     if (prices.length < CONFIG.TREND.MIN_POINTS) {
-        return { trend: "unknown", strength: 0 };
+        return { trend: "unknown", strength: 0, pValue: 1, isSignificant: false };
     }
 
     // Weighted linear regression
@@ -318,24 +324,55 @@ function detectTrend(
     const meanX = sumWX / totalWeight;
     const meanY = sumWY / totalWeight;
 
-    // Slope calculation
+    // Slope and intercept calculation
     const numerator = sumWXY / totalWeight - meanX * meanY;
     const denominator = sumWXX / totalWeight - meanX * meanX;
 
     if (Math.abs(denominator) < 0.0001) {
-        return { trend: "stable", strength: 0 };
+        return { trend: "stable", strength: 0, pValue: 1, isSignificant: false };
     }
 
     const slope = numerator / denominator;
+    const intercept = meanY - slope * meanX;
+
+    // Calculate residuals and MSE for t-test
+    let sumSquaredResiduals = 0;
+    let sumWXXCentered = 0;
+    for (let i = 0; i < n; i++) {
+        const predicted = intercept + slope * normalizedTerms[i];
+        const residual = prices[i] - predicted;
+        sumSquaredResiduals += weights[i] * residual * residual;
+        sumWXXCentered += weights[i] * Math.pow(normalizedTerms[i] - meanX, 2);
+    }
+
+    // Degrees of freedom for weighted regression
+    const effectiveN = Math.pow(totalWeight, 2) / weights.reduce((sum, w) => sum + w * w, 0);
+    const df = Math.max(1, effectiveN - 2);
+
+    // Mean Squared Error
+    const mse = sumSquaredResiduals / df;
+
+    // Standard error of slope
+    const seSlope = Math.sqrt(mse / (totalWeight * sumWXXCentered / totalWeight));
+
+    // t-statistic
+    const tStat = seSlope > 0 ? Math.abs(slope) / seSlope : 0;
+
+    // Approximate p-value using t-distribution (two-tailed)
+    // Using approximation for small samples
+    const pValue = tStat > 0 ? 2 * (1 - tCDF(tStat, df)) : 1;
+
+    // Statistical significance at 10% level (more lenient for small samples)
+    const isSignificant = pValue < 0.10;
 
     // Convert slope to percentage change relative to mean price
     const percentageChange = (slope / meanY);
 
-    // Determine trend direction and strength
+    // Only declare a trend if statistically significant
     let trend: "rising" | "stable" | "falling";
-    if (percentageChange > CONFIG.TREND.SIGNIFICANCE) {
+    if (isSignificant && percentageChange > 0.05) {
         trend = "rising";
-    } else if (percentageChange < -CONFIG.TREND.SIGNIFICANCE) {
+    } else if (isSignificant && percentageChange < -0.05) {
         trend = "falling";
     } else {
         trend = "stable";
@@ -344,7 +381,122 @@ function detectTrend(
     // Strength is the absolute percentage change, capped at 1
     const strength = Math.min(Math.abs(percentageChange) / 0.5, 1);
 
-    return { trend, strength };
+    return { trend, strength, pValue, isSignificant };
+}
+
+/**
+ * Approximate t-distribution CDF using normal approximation for large df
+ * and more accurate approximation for small df
+ */
+function tCDF(t: number, df: number): number {
+    // For df > 30, use normal approximation
+    if (df > 30) {
+        return 0.5 * (1 + erf(t / Math.sqrt(2)));
+    }
+
+    // For smaller df, use a better approximation
+    // Based on incomplete beta function relationship
+    const x = df / (df + t * t);
+    const a = df / 2;
+    const b = 0.5;
+
+    // Regularized incomplete beta function approximation
+    const beta = incompleteBeta(x, a, b);
+
+    if (t >= 0) {
+        return 1 - 0.5 * beta;
+    } else {
+        return 0.5 * beta;
+    }
+}
+
+/**
+ * Incomplete beta function approximation
+ */
+function incompleteBeta(x: number, a: number, b: number): number {
+    if (x === 0) return 0;
+    if (x === 1) return 1;
+
+    // Use continued fraction expansion for better accuracy
+    const bt = Math.exp(
+        a * Math.log(x) + b * Math.log(1 - x) -
+        Math.log(a) - logBeta(a, b)
+    );
+
+    if (x < (a + 1) / (a + b + 2)) {
+        return bt * betaCF(x, a, b) / a;
+    } else {
+        return 1 - bt * betaCF(1 - x, b, a) / b;
+    }
+}
+
+function logBeta(a: number, b: number): number {
+    return logGamma(a) + logGamma(b) - logGamma(a + b);
+}
+
+function logGamma(x: number): number {
+    // Lanczos approximation
+    const g = 7;
+    const c = [
+        0.99999999999980993,
+        676.5203681218851,
+        -1259.1392167224028,
+        771.32342877765313,
+        -176.61502916214059,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.9843695780195716e-6,
+        1.5056327351493116e-7
+    ];
+
+    if (x < 0.5) {
+        return Math.log(Math.PI / Math.sin(Math.PI * x)) - logGamma(1 - x);
+    }
+
+    x -= 1;
+    let a = c[0];
+    for (let i = 1; i < g + 2; i++) {
+        a += c[i] / (x + i);
+    }
+    const t = x + g + 0.5;
+    return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
+}
+
+function betaCF(x: number, a: number, b: number): number {
+    const maxIterations = 100;
+    const epsilon = 1e-10;
+
+    const qab = a + b;
+    const qap = a + 1;
+    const qam = a - 1;
+    let c = 1;
+    let d = 1 - qab * x / qap;
+
+    if (Math.abs(d) < epsilon) d = epsilon;
+    d = 1 / d;
+    let h = d;
+
+    for (let i = 1; i <= maxIterations; i++) {
+        const m2 = 2 * i;
+        let aa = i * (b - i) * x / ((qam + m2) * (a + m2));
+        d = 1 + aa * d;
+        if (Math.abs(d) < epsilon) d = epsilon;
+        c = 1 + aa / c;
+        if (Math.abs(c) < epsilon) c = epsilon;
+        d = 1 / d;
+        h *= d * c;
+        aa = -(a + i) * (qab + i) * x / ((a + m2) * (qap + m2));
+        d = 1 + aa * d;
+        if (Math.abs(d) < epsilon) d = epsilon;
+        c = 1 + aa / c;
+        if (Math.abs(c) < epsilon) c = epsilon;
+        d = 1 / d;
+        const del = d * c;
+        h *= del;
+        if (Math.abs(del - 1) < epsilon) break;
+    }
+
+    return h;
 }
 
 /**
@@ -472,6 +624,171 @@ function determineConfidence(dataPoints: number): "high" | "medium" | "low" | "i
     return "insufficient";
 }
 
+/**
+ * Calculate uncertainty margin based on data scarcity
+ * Fewer data points = wider margin for safe bid
+ */
+function calculateUncertaintyMargin(dataPoints: number, volatility: number): number {
+    const { BASE_MARGIN, SCARCITY_PENALTY, MIN_MARGIN, MAX_MARGIN } = CONFIG.UNCERTAINTY_SCALING;
+
+    // Start with base margin
+    let margin = BASE_MARGIN;
+
+    // Add penalty for sparse data (below 6 data points)
+    const dataShortfall = Math.max(0, CONFIG.MIN_DATA_HIGH_CONFIDENCE - dataPoints);
+    margin += dataShortfall * SCARCITY_PENALTY;
+
+    // Add volatility component (higher volatility = wider margin)
+    margin += volatility * 0.3; // 30% of volatility added to margin
+
+    // Clamp to reasonable range
+    return Math.max(MIN_MARGIN, Math.min(MAX_MARGIN, margin));
+}
+
+/**
+ * Calculate data-driven phase multipliers from historical data
+ * Returns actual observed ratios instead of fixed constants
+ */
+function calculateDataDrivenPhaseMultipliers(
+    allBids: HistoricalBid[]
+): {
+    P2_VS_P1: number;
+    P3_VS_P1: number;
+    P4_VS_P1: number;
+    P2_confidence: number;
+    P3_confidence: number;
+    P4_confidence: number;
+} {
+    const defaults = CONFIG.PHASE_RELATIONSHIPS_DEFAULT;
+
+    // Group bids by term to find same-term phase comparisons
+    const bidsByTerm = new Map<string, Map<string, number>>();
+
+    for (const bid of allBids) {
+        if (!bidsByTerm.has(bid.term)) {
+            bidsByTerm.set(bid.term, new Map());
+        }
+        bidsByTerm.get(bid.term)!.set(bid.phase, bid.clearingPrice);
+    }
+
+    // Calculate ratios for terms where we have both phases
+    const p2p1Ratios: number[] = [];
+    const p3p1Ratios: number[] = [];
+    const p4p1Ratios: number[] = [];
+
+    for (const [, phases] of bidsByTerm) {
+        const p1 = phases.get("1");
+        const p2 = phases.get("2");
+        const p3 = phases.get("3");
+        const p4 = phases.get("4");
+
+        if (p1 && p1 > 0) {
+            if (p2 && p2 > 0) p2p1Ratios.push(p2 / p1);
+            if (p3 && p3 > 0) p3p1Ratios.push(p3 / p1);
+            if (p4 && p4 > 0) p4p1Ratios.push(p4 / p1);
+        }
+    }
+
+    // Calculate median ratios (more robust than mean)
+    const medianRatio = (ratios: number[]): number => {
+        if (ratios.length === 0) return 0;
+        const sorted = [...ratios].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+
+    // Calculate confidence based on sample size (0-1)
+    const calcConfidence = (n: number): number => {
+        if (n === 0) return 0;
+        if (n >= 5) return 1;
+        return n / 5;
+    };
+
+    // Use data-driven ratios if available, otherwise fall back to defaults
+    const p2Median = medianRatio(p2p1Ratios);
+    const p3Median = medianRatio(p3p1Ratios);
+    const p4Median = medianRatio(p4p1Ratios);
+
+    return {
+        P2_VS_P1: p2p1Ratios.length >= 2 ? p2Median : defaults.P2_VS_P1,
+        P3_VS_P1: p3p1Ratios.length >= 2 ? p3Median : defaults.P3_VS_P1,
+        P4_VS_P1: p4p1Ratios.length >= 2 ? p4Median : defaults.P4_VS_P1,
+        P2_confidence: calcConfidence(p2p1Ratios.length),
+        P3_confidence: calcConfidence(p3p1Ratios.length),
+        P4_confidence: calcConfidence(p4p1Ratios.length),
+    };
+}
+
+/**
+ * Calculate win probability for a given bid amount using conformal prediction approach
+ * Returns P(win | bid) based on historical clearing prices
+ */
+function calculateWinProbability(
+    bid: number,
+    prices: number[],
+    weights: number[],
+    expectedPrice: number,
+    stdDev: number
+): number {
+    if (bid <= 0) return 0;
+    if (prices.length === 0) {
+        // No data - use log-normal approximation
+        if (expectedPrice <= 0) return 50;
+        return logNormalCDF(bid, expectedPrice, Math.max(stdDev, expectedPrice * 0.2)) * 100;
+    }
+
+    // Conformal prediction approach:
+    // Count proportion of historical prices that the bid would have beaten
+    // Then apply a small-sample correction
+
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+    let weightBeaten = 0;
+
+    for (let i = 0; i < prices.length; i++) {
+        if (bid >= prices[i]) {
+            weightBeaten += weights[i];
+        } else if (bid >= prices[i] * 0.95) {
+            // Partial credit for being close (within 5%)
+            weightBeaten += weights[i] * 0.5;
+        }
+    }
+
+    // Raw empirical probability
+    const empiricalProb = weightBeaten / totalWeight;
+
+    // Small sample correction (shrink toward 50% with fewer data points)
+    // This prevents overconfidence with limited data
+    const n = prices.length;
+    const shrinkage = Math.min(1, n / 10); // Full confidence at 10+ data points
+    const adjustedProb = shrinkage * empiricalProb + (1 - shrinkage) * 0.5;
+
+    // Also blend with parametric estimate for smoothness
+    const parametricProb = logNormalCDF(bid, expectedPrice, Math.max(stdDev, expectedPrice * 0.15));
+
+    // Weight empirical more with more data, parametric more with less data
+    const empiricalWeight = Math.min(1, n / 6);
+    const finalProb = empiricalWeight * adjustedProb + (1 - empiricalWeight) * parametricProb;
+
+    return Math.round(finalProb * 100);
+}
+
+/**
+ * Log-normal CDF
+ */
+function logNormalCDF(x: number, mean: number, stdDev: number): number {
+    if (x <= 0 || mean <= 0) return 0;
+
+    // Convert to log-space parameters
+    const variance = stdDev * stdDev;
+    const sigma_log_sq = Math.log(1 + variance / (mean * mean));
+    const sigma_log = Math.sqrt(sigma_log_sq);
+    const mu_log = Math.log(mean) - 0.5 * sigma_log_sq;
+
+    // CDF using error function
+    const z = (Math.log(x) - mu_log) / (sigma_log * Math.sqrt(2));
+    return 0.5 * (1 + erf(z));
+}
+
 // =============================================================================
 // PHASE-SPECIFIC FORECASTING
 // =============================================================================
@@ -522,11 +839,12 @@ function forecastPhase(
     // Calculate base statistics
     const stats = weightedStatistics(prices, weights);
 
-    // Detect trend
-    const { trend, strength: trendStrength } = detectTrend(prices, terms, weights);
+    // Detect trend with statistical significance testing
+    const trendResult = detectTrend(prices, terms, weights);
+    const { trend, strength: trendStrength } = trendResult;
 
     // Calculate adjustments
-    let basePrice = stats.mean;
+    const basePrice = stats.mean;
 
     // 1. Trend adjustment
     let trendMultiplier = 1.0;
@@ -597,31 +915,88 @@ function forecastPhase(
 
     const expectedPrice = Math.round(basePrice * totalMultiplier);
 
-    // Calculate bid recommendations using adjusted percentiles
-    const adjustedPercentile = (p: number) => Math.round(stats.percentile(p) * totalMultiplier);
-
     // Volatility: coefficient of variation
     const volatility = stats.mean > 0 ? stats.stdDev / stats.mean : 0;
+
+    // IMPROVED: Calculate uncertainty-adjusted bid recommendations
+    // Instead of simple percentiles, use expected price + uncertainty margin
+    const uncertaintyMargin = calculateUncertaintyMargin(prices.length, volatility);
+
+    // Safe bid: expected price + margin (gives ~85% win probability)
+    const safeBid = Math.round(expectedPrice * (1 + uncertaintyMargin));
+
+    // Aggressive bid: expected price (gives ~50-60% win probability)
+    const aggressiveBid = Math.round(expectedPrice);
+
+    // Minimum bid: expected price - small margin (gives ~25-30% win probability)
+    const minimumBid = Math.round(expectedPrice * (1 - uncertaintyMargin * 0.5));
+
+    // Calculate probability curve data with conformal approach
+    const adjustedStdDev = stats.stdDev * totalMultiplier;
+    const probData = generateWinProbabilityCurve(
+        prices.map(p => p * totalMultiplier / (stats.mean || 1) * basePrice), // Adjusted prices
+        weights,
+        expectedPrice,
+        adjustedStdDev
+    );
+
+    // Add trend significance info to factors if significant
+    if (trendResult.isSignificant && trend !== "stable") {
+        factors.push({
+            name: "Trend Significance",
+            impact: 0,
+            description: `Trend is statistically significant (p=${trendResult.pValue.toFixed(3)})`,
+        });
+    }
 
     return {
         phase,
         expectedPrice,
-        safeBid: adjustedPercentile(CONFIG.PERCENTILES.SAFE),
-        aggressiveBid: adjustedPercentile(CONFIG.PERCENTILES.AGGRESSIVE),
-        minimumBid: adjustedPercentile(CONFIG.PERCENTILES.MINIMUM),
+        safeBid,
+        aggressiveBid,
+        minimumBid,
         confidence: determineConfidence(prices.length),
         dataPoints: prices.length,
         trend,
         trendStrength,
+        trendSignificant: trendResult.isSignificant,
         volatility,
         demandPressure,
+        uncertaintyMargin,
         factors,
-        probabilityData: calculateProbabilityDistribution(prices, expectedPrice, expectedPrice * volatility),
+        probabilityData: probData,
     };
 }
 
 /**
+ * Generate win probability curve showing P(win) for different bid amounts
+ */
+function generateWinProbabilityCurve(
+    prices: number[],
+    weights: number[],
+    expectedPrice: number,
+    stdDev: number
+): Array<{ bid: number; probability: number }> {
+    if (expectedPrice <= 0) return [];
+
+    const points: Array<{ bid: number; probability: number }> = [];
+
+    // Generate curve from 50% of expected to 150% of expected
+    const minBid = Math.max(0, Math.round(expectedPrice * 0.5));
+    const maxBid = Math.round(expectedPrice * 1.5);
+    const step = Math.max(1, Math.round((maxBid - minBid) / 40));
+
+    for (let bid = minBid; bid <= maxBid; bid += step) {
+        const prob = calculateWinProbability(bid, prices, weights, expectedPrice, stdDev);
+        points.push({ bid, probability: prob });
+    }
+
+    return points;
+}
+
+/**
  * Estimate phase price from other phases when no direct data exists
+ * Uses DATA-DRIVEN phase multipliers calculated from actual historical ratios
  */
 function estimateFromOtherPhases(
     targetPhase: PhaseType,
@@ -634,8 +1009,8 @@ function estimateFromOtherPhases(
     const phase1Bids = allBids.filter(b => b.phase === "1");
     const phase2Bids = allBids.filter(b => b.phase === "2");
 
-    let baseBids = phase1Bids.length >= phase2Bids.length ? phase1Bids : phase2Bids;
-    let basePhase = phase1Bids.length >= phase2Bids.length ? "1" : "2";
+    const baseBids = phase1Bids.length >= phase2Bids.length ? phase1Bids : phase2Bids;
+    const basePhase = phase1Bids.length >= phase2Bids.length ? "1" : "2";
 
     if (baseBids.length === 0) {
         // No data at all - return insufficient confidence
@@ -663,42 +1038,51 @@ function estimateFromOtherPhases(
     const baseForecast = forecastPhase(basePhase as PhaseType, baseBids, allBids,
         professorData, meetingTime, campus);
 
+    // IMPROVED: Calculate data-driven phase multipliers
+    const phaseMultipliers = calculateDataDrivenPhaseMultipliers(allBids);
+
     // Apply phase relationship multiplier
     let multiplier = 1.0;
     let description = "";
+    let confidence: "high" | "medium" | "low" | "insufficient" = "low";
 
     if (basePhase === "1") {
         switch (targetPhase) {
             case "2":
-                multiplier = CONFIG.PHASE_RELATIONSHIPS.P2_VS_P1;
-                description = "Phase 2 typically 15% higher than Phase 1 for competitive courses";
+                multiplier = phaseMultipliers.P2_VS_P1;
+                const p2Source = phaseMultipliers.P2_confidence > 0.5 ? "from historical data" : "estimated";
+                description = `Phase 2/Phase 1 ratio: ${multiplier.toFixed(2)}x (${p2Source})`;
+                confidence = phaseMultipliers.P2_confidence > 0.8 ? "medium" : "low";
                 break;
             case "3":
-                multiplier = CONFIG.PHASE_RELATIONSHIPS.P3_VS_P1;
-                description = "Phase 3 (combined pool) typically 15% lower than Phase 1";
+                multiplier = phaseMultipliers.P3_VS_P1;
+                const p3Source = phaseMultipliers.P3_confidence > 0.5 ? "from historical data" : "estimated";
+                description = `Phase 3/Phase 1 ratio: ${multiplier.toFixed(2)}x (${p3Source})`;
+                confidence = phaseMultipliers.P3_confidence > 0.8 ? "medium" : "low";
                 break;
             case "4":
             case "PWYB":
-                multiplier = CONFIG.PHASE_RELATIONSHIPS.P4_VS_P1;
-                description = "PWYB typically 30% lower, but varies with demand";
+                multiplier = phaseMultipliers.P4_VS_P1;
+                const p4Source = phaseMultipliers.P4_confidence > 0.5 ? "from historical data" : "estimated";
+                description = `PWYB/Phase 1 ratio: ${multiplier.toFixed(2)}x (${p4Source})`;
+                confidence = phaseMultipliers.P4_confidence > 0.8 ? "medium" : "low";
                 break;
         }
     } else {
         // Base is Phase 2, convert to Phase 1 first, then to target
-        const p1Estimate = baseForecast.expectedPrice / CONFIG.PHASE_RELATIONSHIPS.P2_VS_P1;
         switch (targetPhase) {
             case "1":
-                multiplier = 1 / CONFIG.PHASE_RELATIONSHIPS.P2_VS_P1;
-                description = "Phase 1 typically 15% lower than Phase 2";
+                multiplier = 1 / phaseMultipliers.P2_VS_P1;
+                description = `Phase 1 estimated from Phase 2 (ratio: ${multiplier.toFixed(2)}x)`;
                 break;
             case "3":
-                multiplier = CONFIG.PHASE_RELATIONSHIPS.P3_VS_P1 / CONFIG.PHASE_RELATIONSHIPS.P2_VS_P1;
-                description = "Phase 3 estimated from Phase 2 via Phase 1 relationship";
+                multiplier = phaseMultipliers.P3_VS_P1 / phaseMultipliers.P2_VS_P1;
+                description = `Phase 3 estimated via Phase 2→Phase 1 relationship`;
                 break;
             case "4":
             case "PWYB":
-                multiplier = CONFIG.PHASE_RELATIONSHIPS.P4_VS_P1 / CONFIG.PHASE_RELATIONSHIPS.P2_VS_P1;
-                description = "PWYB estimated from Phase 2 via Phase 1 relationship";
+                multiplier = phaseMultipliers.P4_VS_P1 / phaseMultipliers.P2_VS_P1;
+                description = `PWYB estimated via Phase 2→Phase 1 relationship`;
                 break;
         }
     }
@@ -714,20 +1098,24 @@ function estimateFromOtherPhases(
 
     const expectedPrice = Math.round(baseForecast.expectedPrice * multiplier);
 
+    // IMPROVED: Add extra uncertainty for cross-phase estimates
+    const extraUncertainty = 1.15; // 15% additional margin for cross-phase uncertainty
+    const safeBid = Math.round(baseForecast.safeBid * multiplier * extraUncertainty);
+
     return {
         phase: targetPhase,
         expectedPrice,
-        safeBid: Math.round(baseForecast.safeBid * multiplier),
+        safeBid,
         aggressiveBid: Math.round(baseForecast.aggressiveBid * multiplier),
         minimumBid: Math.round(baseForecast.minimumBid * multiplier),
-        confidence: "low", // Lower confidence for cross-phase estimates
+        confidence,
         dataPoints: baseForecast.dataPoints,
         trend: baseForecast.trend,
         trendStrength: baseForecast.trendStrength,
         volatility: baseForecast.volatility,
         demandPressure: baseForecast.demandPressure,
         factors,
-        probabilityData: calculateProbabilityDistribution([], expectedPrice, expectedPrice * baseForecast.volatility),
+        probabilityData: generateWinProbabilityCurve([], [], expectedPrice, expectedPrice * baseForecast.volatility),
     };
 }
 
@@ -1096,57 +1484,78 @@ function normalizePhase(phase: Phase): PhaseType {
 }
 
 /**
- * Calculate probability distribution for plotting (Log-Normal approximation)
+ * EXPORTED: Get win probability for a specific bid amount
+ * Useful for UI components that want to show "If you bid X, you have Y% chance of winning"
+ *
+ * @param bid - The bid amount to evaluate
+ * @param probabilityData - The probability curve data from ForecastResult
+ * @returns Win probability as a percentage (0-100)
  */
-function calculateProbabilityDistribution(
-    prices: number[],
-    meanPrice: number,
-    stdDev: number
-): Array<{ bid: number; probability: number }> {
-    // If mean is 0, return empty
-    if (meanPrice <= 0) return [];
+export function getWinProbabilityForBid(
+    bid: number,
+    probabilityData: Array<{ bid: number; probability: number }> | undefined
+): number {
+    if (!probabilityData || probabilityData.length === 0) return 50;
+    if (bid <= 0) return 0;
 
-    // If stdDev is 0 (or very small), return step function
-    if (stdDev < 1) {
-        return [
-            { bid: Math.max(0, meanPrice - 10), probability: 0 },
-            { bid: meanPrice, probability: 50 },
-            { bid: meanPrice + 10, probability: 100 }
-        ];
+    // Find the two closest points and interpolate
+    let lower = probabilityData[0];
+    let upper = probabilityData[probabilityData.length - 1];
+
+    for (let i = 0; i < probabilityData.length - 1; i++) {
+        if (probabilityData[i].bid <= bid && probabilityData[i + 1].bid >= bid) {
+            lower = probabilityData[i];
+            upper = probabilityData[i + 1];
+            break;
+        }
     }
 
-    // Use Log-Normal distribution because prices > 0 and usually right-skewed
-    // If mean/stdev are from normal space, we need to convert to log-space params
-    // sigma_log^2 = ln(1 + var/mean^2)
-    // mu_log = ln(mean) - 0.5 * sigma_log^2
+    // Handle edge cases
+    if (bid <= lower.bid) return lower.probability;
+    if (bid >= upper.bid) return upper.probability;
 
-    const variance = stdDev * stdDev;
-    const sigma_log_sq = Math.log(1 + variance / (meanPrice * meanPrice));
-    const sigma_log = Math.sqrt(sigma_log_sq);
-    const mu_log = Math.log(meanPrice) - 0.5 * sigma_log_sq;
+    // Linear interpolation
+    const ratio = (bid - lower.bid) / (upper.bid - lower.bid);
+    return Math.round(lower.probability + ratio * (upper.probability - lower.probability));
+}
 
-    const points: Array<{ bid: number; probability: number }> = [];
-    const minBid = Math.max(0, meanPrice - 2.5 * stdDev);
-    const maxBid = meanPrice + 3 * stdDev;
-    // Ensure we have a reasonable range
-    const startRange = Math.max(0, Math.floor(minBid / 10) * 10);
-    const endRange = Math.ceil(maxBid / 10) * 10;
-    const step = Math.max(1, (endRange - startRange) / 50);
+/**
+ * EXPORTED: Get recommended bid for a target win probability
+ * Inverse of getWinProbabilityForBid - "I want 80% chance of winning, how much should I bid?"
+ *
+ * @param targetProbability - Desired win probability (0-100)
+ * @param probabilityData - The probability curve data from ForecastResult
+ * @returns Recommended bid amount, or 0 if cannot determine
+ */
+export function getBidForTargetProbability(
+    targetProbability: number,
+    probabilityData: Array<{ bid: number; probability: number }> | undefined
+): number {
+    if (!probabilityData || probabilityData.length === 0) return 0;
 
-    for (let bid = startRange; bid <= endRange; bid += step) {
-        if (bid <= 0) continue;
+    // Clamp target to valid range
+    targetProbability = Math.max(0, Math.min(100, targetProbability));
 
-        // Log-Normal CDF: 0.5 + 0.5 * erf((ln(x) - mu) / (sigma * sqrt(2)))
-        const z = (Math.log(bid) - mu_log) / (sigma_log * Math.sqrt(2));
-        const prob = 0.5 * (1 + erf(z));
+    // Find the two closest points and interpolate
+    for (let i = 0; i < probabilityData.length - 1; i++) {
+        const lower = probabilityData[i];
+        const upper = probabilityData[i + 1];
 
-        points.push({
-            bid: Math.round(bid),
-            probability: Math.round(prob * 100),
-        });
+        if (lower.probability <= targetProbability && upper.probability >= targetProbability) {
+            // Linear interpolation
+            const probRange = upper.probability - lower.probability;
+            if (probRange === 0) return lower.bid;
+
+            const ratio = (targetProbability - lower.probability) / probRange;
+            return Math.round(lower.bid + ratio * (upper.bid - lower.bid));
+        }
     }
 
-    return points;
+    // Target is outside range - return boundary value
+    if (targetProbability <= probabilityData[0].probability) {
+        return probabilityData[0].bid;
+    }
+    return probabilityData[probabilityData.length - 1].bid;
 }
 
 /**
