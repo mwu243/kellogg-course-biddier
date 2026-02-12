@@ -115,8 +115,8 @@ export function DataUploader({ onDataLoaded }: DataUploaderProps) {
     };
 
     const processFiles = () => {
-        if (!bidsFile || !reviewsFile) {
-            setError("Please upload Bidding History and Professor Reviews to continue.");
+        if (!bidsFile || !reviewsFile || !scheduleFile) {
+            setError("Please upload all three required files to continue.");
             return;
         }
 
@@ -125,7 +125,7 @@ export function DataUploader({ onDataLoaded }: DataUploaderProps) {
         let reviewsData: any[] = [];
         let scheduleData: any[] = [];
         let filesProcessed = 0;
-        const totalFiles = scheduleFile ? 3 : 2;
+        const totalFiles = 3;
 
         const checkComplete = () => {
             filesProcessed++;
@@ -159,22 +159,20 @@ export function DataUploader({ onDataLoaded }: DataUploaderProps) {
             }
         });
 
-        if (scheduleFile) {
-            Papa.parse(scheduleFile, {
-                header: true,
-                complete: (results) => {
-                    scheduleData = results.data;
-                    checkComplete();
-                },
-                error: (err) => {
-                    setError("Error parsing Schedule CSV: " + err.message);
-                    setLoading(false);
-                }
-            });
-        }
+        Papa.parse(scheduleFile, {
+            header: true,
+            complete: (results) => {
+                scheduleData = results.data;
+                checkComplete();
+            },
+            error: (err) => {
+                setError("Error parsing Schedule CSV: " + err.message);
+                setLoading(false);
+            }
+        });
     };
 
-    const isReady = bidsFile && reviewsFile;
+    const isReady = bidsFile && reviewsFile && scheduleFile;
 
     return (
         <div className="min-h-screen flex items-center justify-center p-6">
@@ -220,8 +218,9 @@ export function DataUploader({ onDataLoaded }: DataUploaderProps) {
                         id="schedule-upload"
                         icon={<Calendar className="w-5 h-5" />}
                         title="Next Semester Schedule"
-                        description="Upload to filter by upcoming courses"
+                        description="CourseSchedule.csv from Kellogg"
                         file={scheduleFile}
+                        required
                         onChange={(e) => handleFileChange(e, "schedule")}
                     />
                 </div>
